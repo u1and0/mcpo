@@ -7,7 +7,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
     ca-certificates \
+    docker.io \
     && rm -rf /var/lib/apt/lists/*
+
+# Confirm docker versions (optional debugging info)
+RUN docker --version
 
 # Install Node.js and npm via NodeSource 
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
@@ -16,6 +20,12 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 
 # Confirm npm and node versions (optional debugging info)
 RUN node -v && npm -v
+
+# install deno
+RUN npm install -g deno
+
+# Confirm deno versions (optional debugging info)
+RUN deno --version
 
 # Copy your mcpo source code (assuming in src/mcpo)
 COPY . /app
