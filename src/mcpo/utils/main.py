@@ -1,10 +1,12 @@
+import logging
 import json
 import traceback
 from typing import Any, Dict, ForwardRef, List, Optional, Type, Union
-import logging
-from fastapi import HTTPException
 
-from mcp import ClientSession, types
+from anyio import ClosedResourceError
+from fastapi import HTTPException, Request
+
+from mcp import types
 from mcp.types import (
     CallToolResult,
     PARSE_ERROR,
@@ -19,6 +21,8 @@ from mcp.shared.exceptions import McpError
 from pydantic import Field, create_model
 from pydantic.fields import FieldInfo
 
+from mcpo.utils.headers import process_headers_for_server
+
 MCP_ERROR_TO_HTTP_STATUS = {
     PARSE_ERROR: 400,
     INVALID_REQUEST: 400,
@@ -28,6 +32,13 @@ MCP_ERROR_TO_HTTP_STATUS = {
 }
 
 logger = logging.getLogger(__name__)
+
+
+def normalize_server_type(server_type: str) -> str:
+    """Normalize server_type to a standard value."""
+    if server_type in ["streamable_http", "streamablehttp", "streamable-http"]:
+        return "streamable-http"
+    return server_type
 
 
 def process_tool_response(result: CallToolResult) -> list:
@@ -52,8 +63,8 @@ def process_tool_response(result: CallToolResult) -> list:
 
 
 def name_needs_alias(name: str) -> bool:
-    """Check if a field name needs aliasing (for now if it starts with '__')."""
-    return name.startswith("__")
+    """Check if a field name needs aliasing (if it starts with '_')."""
+    return name.startswith("_")
 
 
 def generate_alias_name(original_name: str, existing_names: set) -> str:
@@ -61,7 +72,7 @@ def generate_alias_name(original_name: str, existing_names: set) -> str:
     Generate an alias field name by stripping unwanted chars, and avoiding conflicts with existing names.
 
     Args:
-        original_name: The original field name (should start with '__')
+        original_name: The original field name (should start with '_')
         existing_names: Set of existing names to avoid conflicts with
 
     Returns:
@@ -129,6 +140,7 @@ def _process_schema_property(
                 f"{model_name_prefix}_{prop_name}",
                 f"choice_{i}",
                 False,
+                schema_defs=schema_defs,
             )
             type_hints.append(type_hint)
         return Union[tuple(type_hints)], pydantic_field
@@ -142,7 +154,12 @@ def _process_schema_property(
             temp_schema = dict(prop_schema)
             temp_schema["type"] = type_option
             type_hint, _ = _process_schema_property(
-                _model_cache, temp_schema, model_name_prefix, prop_name, False
+                _model_cache,
+                temp_schema,
+                model_name_prefix,
+                prop_name,
+                False,
+                schema_defs=schema_defs,
             )
             type_hints.append(type_hint)
 
@@ -260,11 +277,50 @@ def get_model_fields(form_model_name, properties, required_fields, schema_defs=N
 
 
 def get_tool_handler(
-    session,
     endpoint_name,
     form_model_fields,
     response_model_fields=None,
+    client_header_forwarding_config=None,
 ):
+    async def call_tool_with_reconnect(
+        request: Request, arguments: Dict[str, Any]
+    ) -> CallToolResult:
+        session_manager = getattr(request.app.state, "session_manager", None)
+
+        async def _invoke(session):
+            return await session.call_tool(endpoint_name, arguments=arguments)
+
+        if session_manager:
+            try:
+                session, _ = await session_manager.ensure_initialized()
+            except ClosedResourceError:
+                logger.warning(
+                    "Session closed while initializing '%s'; attempting reconnect",
+                    endpoint_name,
+                )
+                session, _ = await session_manager.reconnect()
+            request.app.state.session = session
+
+            try:
+                return await _invoke(session)
+            except ClosedResourceError:
+                logger.warning(
+                    "Session closed during call to '%s'; attempting reconnect",
+                    endpoint_name,
+                )
+                session, _ = await session_manager.reconnect()
+                request.app.state.session = session
+                return await _invoke(session)
+
+        session = getattr(request.app.state, "session", None)
+        if not session:
+            raise HTTPException(
+                status_code=500,
+                detail={"message": "MCP session is not available"},
+            )
+
+        return await _invoke(session)
+
     if form_model_fields:
         FormModel = create_model(f"{endpoint_name}_form_model", **form_model_fields)
         ResponseModel = (
@@ -273,114 +329,121 @@ def get_tool_handler(
             else Any
         )
 
-        def make_endpoint_func(
-            endpoint_name: str, FormModel, session: ClientSession
-        ):  # Parameterized endpoint
-            async def tool(form_data: FormModel) -> Union[ResponseModel, Any]:
-                args = form_data.model_dump(exclude_none=True, by_alias=True)
-                logger.info(f"Calling endpoint: {endpoint_name}, with args: {args}")
-                try:
-                    result = await session.call_tool(endpoint_name, arguments=args)
+        async def tool(
+            form_data: FormModel, request: Request
+        ) -> Union[ResponseModel, Any]:
+            args = form_data.model_dump(exclude_none=True, by_alias=True)
 
-                    if result.isError:
-                        error_message = "Unknown tool execution error"
-                        error_data = None  # Initialize error_data
-                        if result.content:
-                            if isinstance(result.content[0], types.TextContent):
-                                error_message = result.content[0].text
-                        detail = {"message": error_message}
-                        if error_data is not None:
-                            detail["data"] = error_data
-                        raise HTTPException(
-                            status_code=500,
-                            detail=detail,
-                        )
+            forwarded_headers = {}
+            if (
+                client_header_forwarding_config
+                and client_header_forwarding_config.get("enabled", False)
+            ):
+                forwarded_headers = process_headers_for_server(
+                    request, client_header_forwarding_config
+                )
 
-                    response_data = process_tool_response(result)
-                    final_response = (
-                        response_data[0] if len(response_data) == 1 else response_data
-                    )
-                    return final_response
+            meta = {}
+            if forwarded_headers:
+                meta["headers"] = forwarded_headers
 
-                except McpError as e:
-                    logger.info(
-                        f"MCP Error calling {endpoint_name}: {traceback.format_exc()}"
-                    )
-                    status_code = MCP_ERROR_TO_HTTP_STATUS.get(e.error.code, 500)
-                    raise HTTPException(
-                        status_code=status_code,
-                        detail=(
-                            {"message": e.error.message, "data": e.error.data}
-                            if e.error.data is not None
-                            else {"message": e.error.message}
-                        ),
-                    )
-                except Exception as e:
-                    logger.info(
-                        f"Unexpected error calling {endpoint_name}: {traceback.format_exc()}"
-                    )
-                    raise HTTPException(
-                        status_code=500,
-                        detail={"message": "Unexpected error", "error": str(e)},
-                    )
+            logger.info(f"Calling endpoint: {endpoint_name}, with args: {args}")
+            try:
+                result = await call_tool_with_reconnect(request, args)
 
-            return tool
+                if result.isError:
+                    error_message = "Unknown tool execution error"
+                    error_data = None
+                    if result.content and isinstance(
+                        result.content[0], types.TextContent
+                    ):
+                        error_message = result.content[0].text
+                    detail = {"message": error_message}
+                    if error_data is not None:
+                        detail["data"] = error_data
+                    raise HTTPException(status_code=500, detail=detail)
 
-        tool_handler = make_endpoint_func(endpoint_name, FormModel, session)
-    else:
+                response_data = process_tool_response(result)
+                final_response = (
+                    response_data[0] if len(response_data) == 1 else response_data
+                )
+                return final_response
 
-        def make_endpoint_func_no_args(
-            endpoint_name: str, session: ClientSession
-        ):  # Parameterless endpoint
-            async def tool():  # No parameters
-                logger.info(f"Calling endpoint: {endpoint_name}, with no args")
-                try:
-                    result = await session.call_tool(
-                        endpoint_name, arguments={}
-                    )  # Empty dict
+            except McpError as e:
+                logger.info(
+                    f"MCP Error calling {endpoint_name}: {traceback.format_exc()}"
+                )
+                status_code = MCP_ERROR_TO_HTTP_STATUS.get(e.error.code, 500)
+                raise HTTPException(
+                    status_code=status_code,
+                    detail=(
+                        {"message": e.error.message, "data": e.error.data}
+                        if e.error.data is not None
+                        else {"message": e.error.message}
+                    ),
+                )
+            except Exception as e:
+                logger.info(
+                    f"Unexpected error calling {endpoint_name}: {traceback.format_exc()}"
+                )
+                raise HTTPException(
+                    status_code=500,
+                    detail={"message": "Unexpected error", "error": str(e)},
+                )
 
-                    if result.isError:
-                        error_message = "Unknown tool execution error"
-                        if result.content:
-                            if isinstance(result.content[0], types.TextContent):
-                                error_message = result.content[0].text
-                        detail = {"message": error_message}
-                        raise HTTPException(
-                            status_code=500,
-                            detail=detail,
-                        )
+        return tool
 
-                    response_data = process_tool_response(result)
-                    final_response = (
-                        response_data[0] if len(response_data) == 1 else response_data
-                    )
-                    return final_response
+    async def tool(request: Request):
+        forwarded_headers = {}
+        if (
+            client_header_forwarding_config
+            and client_header_forwarding_config.get("enabled", False)
+        ):
+            forwarded_headers = process_headers_for_server(
+                request, client_header_forwarding_config
+            )
 
-                except McpError as e:
-                    logger.info(
-                        f"MCP Error calling {endpoint_name}: {traceback.format_exc()}"
-                    )
-                    status_code = MCP_ERROR_TO_HTTP_STATUS.get(e.error.code, 500)
-                    # Propagate the error received from MCP as an HTTP exception
-                    raise HTTPException(
-                        status_code=status_code,
-                        detail=(
-                            {"message": e.error.message, "data": e.error.data}
-                            if e.error.data is not None
-                            else {"message": e.error.message}
-                        ),
-                    )
-                except Exception as e:
-                    logger.info(
-                        f"Unexpected error calling {endpoint_name}: {traceback.format_exc()}"
-                    )
-                    raise HTTPException(
-                        status_code=500,
-                        detail={"message": "Unexpected error", "error": str(e)},
-                    )
+        meta = {}
+        if forwarded_headers:
+            meta["headers"] = forwarded_headers
 
-            return tool
+        logger.info(f"Calling endpoint: {endpoint_name}, with no args")
+        try:
+            result = await call_tool_with_reconnect(request, {})
 
-        tool_handler = make_endpoint_func_no_args(endpoint_name, session)
+            if result.isError:
+                error_message = "Unknown tool execution error"
+                if result.content and isinstance(result.content[0], types.TextContent):
+                    error_message = result.content[0].text
+                detail = {"message": error_message}
+                raise HTTPException(status_code=500, detail=detail)
 
-    return tool_handler
+            response_data = process_tool_response(result)
+            final_response = (
+                response_data[0] if len(response_data) == 1 else response_data
+            )
+            return final_response
+
+        except McpError as e:
+            logger.info(
+                f"MCP Error calling {endpoint_name}: {traceback.format_exc()}"
+            )
+            status_code = MCP_ERROR_TO_HTTP_STATUS.get(e.error.code, 500)
+            raise HTTPException(
+                status_code=status_code,
+                detail=(
+                    {"message": e.error.message, "data": e.error.data}
+                    if e.error.data is not None
+                    else {"message": e.error.message}
+                ),
+            )
+        except Exception as e:
+            logger.info(
+                f"Unexpected error calling {endpoint_name}: {traceback.format_exc()}"
+            )
+            raise HTTPException(
+                status_code=500,
+                detail={"message": "Unexpected error", "error": str(e)},
+            )
+
+    return tool

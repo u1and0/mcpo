@@ -10,3 +10,8 @@ wheels/
 .venv
 config.json
 docker-compose.yml
+
+.python-version
+.vscode
+
+.DS_Store

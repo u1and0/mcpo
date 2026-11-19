@@ -5,12 +5,62 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-# Changelog
+## [0.0.20] - 2026-02-27
 
-All notable changes to this project will be documented in this file.
+### Added
 
-The format is based on Keep a Changelog,
-and this project adheres to Semantic Versioning.
+* 🔁 **MCP Connection Manager with Auto-Reconnect**: Introduced MCPConnectionManager to manage the full lifecycle of MCP client sessions and transports. Connections that drop due to a ClosedResourceError are now automatically re-established and retried transparently, eliminating manual restarts for intermittent server disconnects.
+* 🔄 **Automatic Retry on Closed Sessions**: Tool calls that encounter a ClosedResourceError will now automatically reconnect to the MCP server and retry the call, providing resilient end-to-end execution without user intervention.
+
+### Changed
+
+* 🧩 **Normalized disabledTools Configuration Key**: The disabled tools setting now accepts both camelCase (disabledTools) and snake_case (disabled_tools) in the config file for backwards compatibility and consistency with other configuration keys.
+* 🧹 **Simplified Tool Handler Architecture**: Refactored get_tool_handler to remove the session parameter and nested factory functions in favor of a cleaner design that resolves the session from the request app state at call time, enabling reconnect-aware tool execution.
+* 🛡️ **Guarded Lifespan Startup During Hot Reload**: The reload handler now checks for the presence of an async context manager before awaiting sub-app lifespan startup, preventing errors when lifespan context is unavailable.
+
+### Fixed
+
+* 🪛 **Fixed Erroneous Validation Raise in disabledTools**: Removed a misplaced raise statement in validate_server_config that would always throw an error after validating disabled_tools, even when the configuration was correct.
+* 🧯 **Graceful Handling of asyncio.CancelledError**: Added explicit CancelledError handling during server creation and lifespan startup to properly roll back routes and log errors instead of crashing silently.
+
+## [0.0.19] - 2025-10-14
+
+### Fixed
+
+* 🔁 **Reverted Client Header Forwarding**: Reverted changes introduced in 0.0.18.
+
+## [0.0.18] - 2025-10-14
+
+### Added
+
+* 🧩 **OAuth Support for Streamable HTTP Servers**: Introduced full OAuth 2.0 support with dynamic client registration for 'streamable_http' MCP servers. This enables secure, standards-compliant authentication flows for both user and service clients.
+* 🔧 **Configurable Disabled Tools**: Added 'disabled_tools' option in server configuration, allowing selective disabling of specific tools without modifying code. Useful for managing staged rollouts or limited-access environments.
+* 🧠 **Adjustable Log Level at Runtime**: Logging verbosity can now be adjusted dynamically, giving operators finer control over monitoring and debugging noise without requiring restarts.
+* 🔁 **Client Header Forwarding**: Added automatic forwarding of client HTTP headers to MCP backends—enabling trace propagation, correlation IDs, and richer observability in distributed environments.
+* 🛤️ **Support for Custom Path Prefixes**: Servers can now run under a custom path prefix, allowing flexible deployment within multi-service gateways or reverse proxy environments.
+* 📄 **Root Path Documentation**: Added documentation describing behavior and configuration for root path handling in multi-app or nested setups.
+
+### Changed
+
+* 🧰 **Refactored Connection Timeout Defaults**: Connection timeout is now set to 'None' by default to prevent premature disconnects during long-running or streaming tasks.
+* 🧹 **Removed Deprecated Python Version Tagging**: Dropped explicit Python version tagging; the project now officially supports Python 3.11 and above without manual tagging overhead.
+
+### Fixed
+
+* 🪛 **Improved Hot Reload Lifespan Tracking**: Fixed an issue where sub-applications created during hot reloads were not properly initialized or cleaned up—ensuring stable lifecycle management during dynamic reconfiguration.
+* 🔗 **Symlink Handling in Config Watcher**: Resolved a bug where configuration symlinks were not updating correctly on modification; watcher now tracks and reloads the proper file path automatically.
+
+## [0.0.17] - 2025-07-22
+
+### Added
+
+- 🔄 **Hot Reload Support for Configuration Files**: Added \`--hot-reload\` flag to watch your config file for changes and dynamically reload MCP servers without restarting the application—enabling seamless development workflows and runtime configuration updates.
+- 🤫 **HTTP Request Filtering for Cleaner Logs**: Added configurable log filtering to reduce noise from frequent HTTP requests, making debugging and monitoring much clearer in production environments.
+
+### Changed
+
+- ⬆️ **Updated MCP Package to v1.12.1**: Upgraded MCP dependency to resolve compatibility issues with Pydantic and improve overall stability and performance.
+- 🔧 **Normalized Streamable HTTP Configuration**: Streamlined configuration syntax for streamable-http servers to align with MCP standards while maintaining backward compatibility.
 
 ## [0.0.16] - 2025-07-02
 

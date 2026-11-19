@@ -60,11 +60,20 @@ def main(
     ssl_keyfile: Annotated[
         Optional[str], typer.Option("--ssl-keyfile", "-K", help="SSL keyfile")
     ] = None,
+    root_path: Annotated[
+        Optional[str], typer.Option("--root-path", help="Root path")
+    ] = "",
     path_prefix: Annotated[
         Optional[str], typer.Option("--path-prefix", help="URL prefix")
     ] = None,
     headers: Annotated[
         Optional[str], typer.Option("--header", "-H", help="Headers in JSON format")
+    ] = None,
+    hot_reload: Annotated[
+        Optional[bool], typer.Option("--hot-reload", help="Enable hot reload for config file changes")
+    ] = False,
+    log_level: Annotated[
+        Optional[str], typer.Option("--log-level", help="Set log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)")
     ] = None,
 ):
     server_command = None
@@ -119,6 +128,10 @@ def main(
     if not path_prefix.startswith("/"):
         path_prefix = f"/{path_prefix}"
 
+    # Set LOG_LEVEL environment variable if provided
+    if log_level:
+        os.environ["LOG_LEVEL"] = log_level
+
     # Run your async run function from mcpo.main
     asyncio.run(
         run(
@@ -136,7 +149,9 @@ def main(
             ssl_certfile=ssl_certfile,
             ssl_keyfile=ssl_keyfile,
             path_prefix=path_prefix,
+            root_path=root_path,
             headers=headers,
+            hot_reload=hot_reload,
         )
     )
 
